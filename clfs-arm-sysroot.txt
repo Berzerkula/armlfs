@@ -1,0 +1,1603 @@
+groupadd clfs
+useradd -s /bin/bash -g clfs -d /home/clfs clfs
+mkdir -pv /home/clfs
+chown -v clfs:clfs /home/clfs
+
+passwd clfs
+
+chown -Rv clfs ${CLFS}
+
+su - clfs
+
+cat > ~/.bash_profile << "EOF"
+exec env -i HOME=${HOME} TERM=${TERM} PS1='\u:\w\$ ' /bin/bash
+EOF
+
+cat > ~/.bashrc << "EOF"
+set +h
+umask 022
+CLFS=/mnt/clfs
+LC_ALL=POSIX
+PATH=${CLFS}/cross-tools/bin:/bin:/usr/bin
+export CLFS LC_ALL PATH
+EOF
+
+source ~/.bash_profile
+
+export CLFS_HOST=$(echo ${MACHTYPE} | sed -e 's/-[^-]*/-cross/')
+export CLFS_TARGET="arm-linux-gnueabihf"
+
+cat >> ~/.bashrc << EOF
+export CLFS_HOST="${CLFS_HOST}"
+export CLFS_TARGET="${CLFS_TARGET}"
+EOF
+
+mkdir -pv ${CLFS}/{etc,var} ${CLFS}/usr/{bin,lib,sbin}
+for i in bin lib sbin; do ln -sv usr/$i ${CLFS}/$i; done
+mkdir -pv ${CLFS}/{boot,dev,{etc/,}opt,home,mnt}
+mkdir -pv ${CLFS}/var/{log,mail,spool}
+mkdir -pv ${CLFS}/var/{opt,cache,lib/{misc,locate},local}
+install -dv -m 0750 ${CLFS}/root
+install -dv -m 1777 ${CLFS}{/var,}/tmp
+mkdir -pv ${CLFS}/usr/{,local/}{bin,include,lib,sbin,src}
+mkdir -pv ${CLFS}/usr/{,local/}share/{doc,info,locale,man}
+mkdir -pv ${CLFS}/usr/{,local/}share/{misc,terminfo,zoneinfo}
+mkdir -pv ${CLFS}/usr/{,local/}share/man/man{1,2,3,4,5,6,7,8}
+for dir in ${CLFS}/usr{,/local}; do
+  ln -sfnv share/{man,doc,info} ${dir}
+done
+ln -sv /run ${CLFS}/var/run
+ln -sv /run/lock ${CLFS}/var/lock
+ln -sv /proc/self/mounts ${CLFS}/etc/mtab
+
+cat > /${CLFS}/etc/hosts << EOF
+127.0.0.1  localhost $(hostname)
+::1        localhost
+EOF
+
+cat > ${CLFS}/etc/passwd << "EOF"
+root:x:0:0:root:/root:/bin/bash
+bin:x:1:1:bin:/dev/null:/usr/bin/false
+daemon:x:6:6:Daemon User:/dev/null:/usr/bin/false
+messagebus:x:18:18:D-Bus Message Daemon User:/run/dbus:/usr/bin/false
+uuidd:x:80:80:UUID Generation Daemon User:/dev/null:/usr/bin/false
+nobody:x:65534:65534:Unprivileged User:/dev/null:/usr/bin/false
+EOF
+
+cat > ${CLFS}/etc/group << "EOF"
+root:x:0:
+bin:x:1:daemon
+sys:x:2:
+kmem:x:3:
+tape:x:4:
+tty:x:5:
+daemon:x:6:
+floppy:x:7:
+disk:x:8:
+lp:x:9:
+dialout:x:10:
+audio:x:11:
+video:x:12:
+utmp:x:13:
+usb:x:14:
+cdrom:x:15:
+adm:x:16:
+messagebus:x:18:
+input:x:24:
+mail:x:34:
+kvm:x:61:
+uuidd:x:80:
+wheel:x:97:
+users:x:999:
+nogroup:x:65534:
+EOF
+
+chmod -v 664 ${CLFS}/var/log/lastlog
+chmod -v 660 ${CLFS}/var/log/btmp
+#chgrp -v 13 ${CLFS}/var/log/lastlog #Do as root later
+
+unset CFLAGS CXXFLAGS
+
+cat >> ~/.bashrc << EOF
+unset CFLAGS
+unset CXXFLAGS
+EOF
+
+export CLFS_HOST="$(echo $MACHTYPE | \
+    sed "s/$(echo $MACHTYPE | cut -d- -f2)/cross/")"
+export CLFS_TARGET="arm-linux-gnueabihf"
+
+cat >> ~/.bashrc << EOF
+export CLFS_HOST="${CLFS_HOST}"
+export CLFS_TARGET="${CLFS_TARGET}"
+EOF
+
+##### CROSS COMPILE TOOLS #####
+
+## LINUX HEADERS
+make ARCH=arm mrproper
+make ARCH=arm headers
+find usr/include -type f ! -name '*.h' -delete
+cp -rv usr/include ${CLFS}/usr
+
+## BINUTILS
+mkdir -v ../binutils-build &&
+cd ../binutils-build &&
+AR=ar AS=as ../binutils-2.41/configure --prefix=${CLFS}/cross-tools \
+   --host=${CLFS_HOST} --target=${CLFS_TARGET} --with-sysroot=${CLFS} \
+   --disable-nls --enable-shared --disable-multilib --enable-gprofng=no \
+   --disable-werror &&
+make configure-host &&
+make &&
+make install
+
+## GCC
+cd gcc-13.2.0
+tar xf ../gmp-6.3.0.tar.xz
+mv gmp-6.3.0/ gmp
+tar xf ../mpfr-4.2.0.tar.xz
+mv mpfr-4.2.0/ mpfr
+tar xf ../mpc-1.3.1.tar.gz
+mv mpc-1.3.1/ mpc
+tar xf ../isl-0.26.tar.gz
+mkdir ../gcc-build
+cd ../gcc-build
+AR=ar LDFLAGS="-Wl,-rpath,${CLFS}/cross-tools/lib" \
+    ../gcc-13.2.0/configure --prefix=${CLFS}/cross-tools \
+    --build=${CLFS_HOST} --host=${CLFS_HOST} --target=${CLFS_TARGET} \
+    --disable-multilib --with-sysroot=${CLFS} --disable-nls \
+    --without-headers --with-newlib --disable-libatomic \
+    --disable-libgomp --disable-libquadmath --disable-libmudflap \
+	--disable-libssp --disable-libvtv --disable-shared --disable-threads \
+	--enable-languages=c,c++ &&
+make all-gcc all-target-libgcc &&
+make install install-gcc install-target-libgcc
+
+## GLIBC
+patch -Np1 -i ../glibc-2.38-fhs-1.patch &&
+cp -v Makeconfig{,.orig} &&
+sed -e 's/-lgcc_eh//g' Makeconfig.orig > Makeconfig &&
+mkdir ../glibc-build &&
+cd ../glibc-build &&
+cat > configparms << EOF
+install_root=${CLFS}
+EOF
+cat > config.cache << EOF
+libc_cv_forced_unwind=yes
+libc_cv_c_cleanup=yes
+libc_cv_ctors_header=yes
+libc_cv_gnu89_inline=yes
+EOF
+BUILD_CC="gcc" CC="${CLFS_TARGET}-gcc" CXX="${CLFS_TARGET}"-g++ \
+    AR="${CLFS_TARGET}-ar" RANLIB="${CLFS_TARGET}-ranlib" \
+    ../glibc-2.38/configure --prefix=/usr \
+    --libexecdir=/usr/lib/glibc --host=${CLFS_TARGET} --build=${CLFS_HOST} \
+    --disable-profile --enable-add-ons --with-tls --enable-kernel=5.18.0 \
+    --with-__thread --with-binutils=${CLFS}/cross-tools/bin \
+    --with-headers=${CLFS}/usr/include --cache-file=config.cache &&
+make &&
+make install && # Install locales from the target
+
+cat > ${CLFS}/etc/nsswitch.conf << "EOF"
+# Begin /etc/nsswitch.conf
+
+passwd: files
+group: files
+shadow: files
+
+hosts: files dns
+networks: files
+
+protocols: files
+services: files
+ethers: files
+rpc: files
+
+# End /etc/nsswitch.conf
+EOF
+tar -xf ../tzdata2023c.tar.gz &&
+ZONEINFO=${CLFS}/usr/share/zoneinfo &&
+mkdir -pv $ZONEINFO/{posix,right} &&
+for tz in etcetera southamerica northamerica europe africa antarctica  \
+          asia australasia backward; do
+    /usr/sbin/zic -L /dev/null   -d $ZONEINFO       ${tz}
+    /usr/sbin/zic -L /dev/null   -d $ZONEINFO/posix ${tz}
+    /usr/sbin/zic -L leapseconds -d $ZONEINFO/right ${tz}
+done
+cp -v zone.tab zone1970.tab iso3166.tab $ZONEINFO &&
+/usr/sbin/zic -d $ZONEINFO -p America/New_York &&
+unset ZONEINFO
+ln -sfv /usr/share/zoneinfo/America/Chicago ${CLFS}/etc/localtime &&
+cat > ${CLFS}/etc/ld.so.conf << "EOF"
+# Begin /etc/ld.so.conf
+
+/usr/local/lib
+/opt/lib
+
+# End /etc/ld.so.conf
+EOF
+
+## libxcrypt (maybe install in ${CLFS}/usr as it'll be overwritten earlier)
+./configure --prefix=${CLFS}/cross-tools &&
+make &&
+make install &&
+ln -sv ${CLFS}/cross-tools/include/crypt.h ../../usr/include/crypt.h && # libstdc++ needs crypt.h for libsanitizer
+ln -sv ${CLFS}/cross-tools/include/xcrypt.h ../../usr/include/xcrypt.h  # No longer in GLIBC since around 2.28
+
+## GCC FINAL (May not need --enable-c99 GCC docs say it is on by default)
+AR=ar LDFLAGS="-Wl,-rpath,${CLFS}/cross-tools/lib" \
+    ../gcc-13.2.0/configure --prefix=${CLFS}/cross-tools \
+    --build=${CLFS_HOST} --host=${CLFS_HOST} --target=${CLFS_TARGET} \
+    --disable-multilib --with-sysroot=${CLFS} --disable-nls \
+    --enable-shared --enable-languages=c,c++ --enable-__cxa_atexit \
+    --enable-c99 --enable-long-long --enable-threads=posix &&
+make AS_FOR_TARGET="${CLFS_TARGET}-as" LD_FOR_TARGET="${CLFS_TARGET}-ld" &&
+make install
+
+## FILE
+./configure --prefix=${CLFS}/cross-tools &&
+make &&
+make install
+
+## GROFF
+PAGE=letter ./configure --prefix=${CLFS}/cross-tools --without-x &&
+make &&
+make install
+
+## SHADOW
+patch -Np1 -i ../shadow-4.13-sysroot_hacks-1.patch (https://clfs.org/~kb0iic/patches/shadow-4.13-sysroot_hacks-1.patch)
+cat > config.cache << EOF
+shadow_cv_passwd_dir="${CLFS}/bin"
+EOF
+cat >> config.cache << EOF
+ac_cv_func_lckpwdf=no
+EOF
+./configure --prefix=${CLFS}/cross-tools --sbindir=${CLFS}/cross-tools/bin \
+    --sysconfdir=$CLFS/etc --disable-shared --without-libpam \
+    --without-audit --without-selinux --program-prefix=${CLFS_TARGET}- \
+    --without-nscd --cache-file=config.cache &&
+cp config.h{,.orig} &&
+sed "/PASSWD_PROGRAM/s/passwd/${CLFS_TARGET}-&/" config.h.orig > config.h &&
+echo "#define SYSCONFDIR \"${CLFS}/etc\"" >> config.h # for some reason, Makefiles not getting created properly from patch. Define here
+make && # Check src/Makefile that usbindir is usbindir = ${prefix}/bin
+make install
+
+## NCURSES
+sed -i s/mawk// configure &&
+./configure --prefix=${CLFS}/cross-tools \
+    --without-debug --without-shared &&
+make -C include &&
+make -C progs tic &&
+install -m755 progs/tic ${CLFS}/cross-tools/bin
+
+## SYSROOT WRAPPER
+cat > sysroot_wrapper.c << "EOF"
+#include <sys/wait.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+
+char *sysrootdir = "";
+
+int main(int argc, char *argv[]) {
+  sysrootdir = getenv("CLFS");
+  if (!sysrootdir)
+    sysrootdir="";
+
+  int stdout_pipe[2];
+  pipe(stdout_pipe);
+
+  pid_t pid = fork();
+
+  if (pid == 0) {
+    /* Redirect stdout to our pipe */
+    close(1);
+    dup(stdout_pipe[1]);
+    close(stdout_pipe[0]);
+    close(stdout_pipe[1]);
+
+    char *name = strdup(argv[0]);
+    strcat(name, ".sysroot");
+
+    execvp(name, argv);
+
+    free(name);
+
+    exit(0);
+  } else {
+    /* Close stdout for write */
+    close(stdout_pipe[1]);
+
+    /* redirect our stdout pipe from the child to our stdin */
+    close(0);
+    dup(stdout_pipe[0]);
+    close(stdout_pipe[0]);
+
+    char c, lc;
+    char *d = malloc(1);
+    int d_len = 0;
+
+    while ((c = fgetc(stdin)) != EOF) {
+      d_len++;
+      d = realloc(d, d_len + 1);
+      *(d + d_len - 1) = c;
+      *(d + d_len) = '\0';
+
+      if ((lc == '-')&&((c == 'L')||(c == 'I'))) {
+        d_len = d_len + strlen(sysrootdir);
+        d = realloc(d, d_len + 1);
+        strcat(d, sysrootdir);
+      }
+
+      lc = c;
+    }
+
+    printf ("%s", d);
+    free(d);
+
+    exit(0);
+  }
+
+  return 0;
+}
+EOF
+
+gcc sysroot_wrapper.c -o ${CLFS}/cross-tools/bin/sysroot_wrapper
+
+## PYTHON May need a native Python build of same version in cross-tools for sysroot
+## Will install pip3 for crossenv used later in base system
+CC= CXX= AR= AS= LD= RANLIB= STRIP= LDFLAGS="-Wl,-rpath,$CLFS/cross-tools/lib:/usr/lib" \
+./configure --prefix=${CLFS}/cross-tools \
+            --enable-shared &&
+sed -i '/mime.types",/s/^/#/' Lib/mimetypes.py &&
+make &&
+make install
+
+## PKGCONF May need cross-tools specific pkgconfig
+./configure --prefix=$CLFS/cross-tools --with-pkg-config-dir=${CLFS}/usr/lib/pkgconfig \
+            --program-prefix=${CLFS_TARGET} --program-prefix=${CLFS_TARGET}- &&
+make &&
+make DESTDIR=${CLFS} install &&
+ln -sv ${CLFS_TARGET}-pkgconf ${CLFS}/cross-tools/bin/${CLFS_TARGET}-pkg-config
+
+
+##### BUILD BASIC SYSTEM (CH6 CLFS SYSROOT / CH8 LFS) #####
+
+## ENVIRONMENT SETTINGS (FOR MANY PACKAGES)
+export CC="${CLFS_TARGET}-gcc"
+export CXX="${CLFS_TARGET}-g++"
+export AR="${CLFS_TARGET}-ar"
+export AS="${CLFS_TARGET}-as"
+export RANLIB="${CLFS_TARGET}-ranlib"
+export LD="${CLFS_TARGET}-ld"
+export STRIP="${CLFS_TARGET}-strip"
+
+## MAN-PAGES
+make prefix=${CLFS}/usr install
+
+## IANA-ETC
+cp -v services protocols ${CLFS}/etc
+
+## ZLIB
+./configure --prefix=/usr &&
+make &&
+make prefix=${CLFS}/usr install &&
+rm -fv ${CLFS}/usr/lib/libz.a
+
+## BZIP2
+patch -Np1 -i ../bzip2-1.0.8-install_docs-1.patch &&
+cp Makefile{,.orig} &&
+sed -e "/^all:/s/ test//" Makefile.orig > Makefile &&
+sed -i -e 's:ln -s -f $(PREFIX)/bin/:ln -s :' Makefile &&
+make -f Makefile-libbz2_so CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" &&
+make clean &&
+make CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" &&
+make PREFIX=${CLFS}/usr install &&
+cp -av libbz2.so.* ${CLFS}/usr/lib &&
+ln -sv libbz2.so.1.0.8 ${CLFS}/usr/lib/libbz2.so &&
+cp -v bzip2-shared ${CLFS}/bin/bzip2 &&
+for i in ${CLFS}/usr/bin/{bzcat,bunzip2}; do
+  ln -sfv bzip2 $i
+done
+rm -fv ${CLFS}/usr/lib/libbz2.a
+
+## XZ
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --disable-static \
+	--docdir=/usr/share/doc/xz-5.4.4 &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/liblzma.la
+
+## ZSTD
+make prefix=/usr &&
+make DESTDIR=${CLFS} prefix=/usr install  &&
+rm -v ${CLFS}/usr/lib/libzstd.a
+
+## FILE
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libmagic.la
+
+## NCURSES
+sed -i 's/INSTALL_OPT_S=\"-s/& --strip-program=${STRIP}/' configure &&
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr           \
+            --mandir=/usr/share/man \
+            --with-shared           \
+            --without-debug         \
+            --without-normal        \
+            --with-cxx-shared       \
+            --enable-pc-files       \
+            --enable-widec          \
+            --with-pkg-config-libdir=/usr/lib/pkgconfig &&
+make &&
+make DESTDIR=${CLFS} install &&
+for lib in ncurses form panel menu ; do
+    rm -vf                    ${CLFS}/usr/lib/lib${lib}.so
+    echo "INPUT(-l${lib}w)" > ${CLFS}/usr/lib/lib${lib}.so
+    ln -sfv ${lib}w.pc        ${CLFS}/usr/lib/pkgconfig/${lib}.pc
+done
+rm -vf                     ${CLFS}/usr/lib/libcursesw.so &&
+echo "INPUT(-lncursesw)" > ${CLFS}/usr/lib/libcursesw.so &&
+ln -sfv libncurses.so      ${CLFS}/usr/lib/libcurses.so &&
+cp -v -R doc -T ${CLFS}/usr/share/doc/ncurses-6.4
+
+## READLINE
+sed -i '/MV.*old/d' Makefile.in &&
+sed -i '/{OLDSUFF}/c:' support/shlib-install &&
+patch -Np1 -i ../readline-8.2-upstream_fix-1.patch &&
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr    \
+            --disable-static \
+            --with-curses    \
+            --docdir=/usr/share/doc/readline-8.2 &&
+make SHLIB_LIBS="-lncursesw" &&
+make DESTDIR=${CLFS} SHLIB_LIBS="-lncursesw" install &&
+install -v -m644 doc/*.{ps,pdf,html,dvi} /usr/share/doc/readline-8.2
+
+## M4
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make DESTDIR=${CLFS} install
+
+## BC
+HOSTCC=gcc ./configure --prefix=/usr -G -O3 -r &&
+make DESTDIR=${CLFS} install
+
+## FLEX
+cat > config.cache << EOF
+ac_cv_func_malloc_0_nonnull=yes
+ac_cv_func_realloc_0_nonnull=yes
+EOF
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --cache-file=config.cache \
+    --docdir=/usr/share/doc/flex-2.6.4 \
+    --disable-static &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libfl.la &&
+ln -sv flex ${CLFS}/usr/bin/lex &&
+ln -sv flex.1 ${CLFS}/usr/share/man/man1/lex.1
+
+## TCL
+SRCDIR=$(pwd)
+cd unix
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr \
+            --mandir=/usr/share/man &&
+make &&
+sed -e "s|$SRCDIR/unix|/usr/lib|" \
+    -e "s|$SRCDIR|/usr/include|"  \
+    -i tclConfig.sh
+
+sed -e "s|$SRCDIR/unix/pkgs/tdbc1.1.5|/usr/lib/tdbc1.1.5|" \
+    -e "s|$SRCDIR/pkgs/tdbc1.1.5/generic|/usr/include|"    \
+    -e "s|$SRCDIR/pkgs/tdbc1.1.5/library|/usr/lib/tcl8.6|" \
+    -e "s|$SRCDIR/pkgs/tdbc1.1.5|/usr/include|"            \
+    -i pkgs/tdbc1.1.5/tdbcConfig.sh &&
+
+sed -e "s|$SRCDIR/unix/pkgs/itcl4.2.3|/usr/lib/itcl4.2.3|" \
+    -e "s|$SRCDIR/pkgs/itcl4.2.3/generic|/usr/include|"    \
+    -e "s|$SRCDIR/pkgs/itcl4.2.3|/usr/include|"            \
+    -i pkgs/itcl4.2.3/itclConfig.sh &&
+unset SRCDIR &&
+make DESTDIR=${CLFS} install &&
+chmod -v u+w ${CLFS}/usr/lib/libtcl8.6.so &&
+make DESTDIR=${CLFS} install-private-headers &&
+ln -sfv tclsh8.6 ${CLFS}/usr/bin/tclsh &&
+mv ${CLFS}/usr/share/man/man3/{Thread,Tcl_Thread}.3 &&
+cd .. &&
+tar -xf ../tcl8.6.13-html.tar.gz --strip-components=1 &&
+mkdir -v -p ${CLFS}/usr/share/doc/tcl-8.6.13 &&
+cp -v -r  ./html/* ${CLFS}/usr/share/doc/tcl-8.6.13
+
+## EXPECT
+patch -Np1 -i ../expect5.45.4-enable-cross-compilation.patch && (https://clfs.org/~kb0iic/patches/expect5.45.4-enable-cross-compilation.patch)
+autoreconf &&
+tar -C tclconfig -xf ../autoconf-2.71.tar.xz --strip-components=2 \
+    autoconf-2.71/build-aux/config.{guess,sub} &&
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr           \
+            --with-tcl=/usr/lib     \
+            --enable-shared         \
+            --mandir=/usr/share/man \
+            --with-tclinclude=/usr/include &&
+sed -i 's@ -I"/usr/include"@@' Makefile &&
+sed -i 's@-L/usr/lib@@' Makefile &&
+make &&
+make DESTDIR=${CLFS} install &&
+ln -svf expect5.45.4/libexpect5.45.4.so ${CLFS}/usr/lib &&
+ln -svf expect5.45.4/libexpect5.45.4.so ${CLFS}/usr/lib
+
+## DEJAGNU
+mkdir -v build &&
+cd build &&
+../configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+             --prefix=/usr &&
+makeinfo --html --no-split -o doc/dejagnu.html ../doc/dejagnu.texi &&
+makeinfo --plaintext       -o doc/dejagnu.txt  ../doc/dejagnu.texi &&
+make DESTDIR=${CLFS} install &&
+install -v -dm755  ${CLFS}/usr/share/doc/dejagnu-1.6.3
+install -v -m644   doc/dejagnu.{html,txt} ${CLFS}/usr/share/doc/dejagnu-1.6.3
+
+## BINUTILS
+sed '6009s/$add_dir//' -i ltmain.sh &&
+mkdir -v ../binutils-build &&
+cd ../binutils-build &&
+AR=ar AS=as  ../binutils-2.41/configure \
+    --prefix=/usr \
+    --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --target=${CLFS_TARGET} --enable-shared \
+    --sysconfdir=/etc --enable-gold --enable-ld=default \
+    --enable-plugins --disable-werror --with-system-zlib \
+    --enable-64-bit-bfd &&
+make tooldir=/usr &&
+sed -i -e 's@-I/usr/local/include@@' -e 's@-L/usr/local/lib @@' gold/Makefile &&
+sed -i -e 's@-I/usr/local/include@@' -e 's@-L/usr/local/lib @@' gold/testsuite/Makefile &&
+sed -i -e 's@-I/usr/local/include@@' -e 's@-L/usr/local/lib @@' ld/Makefile &&
+sed -i -e 's@-I/usr/local/include@@' -e 's@-L/usr/local/lib @@' gas/Makefile &&
+sed -i -e 's@-I/usr/local/include@@' -e 's@-L/usr/local/lib @@' bfd/Makefile &&
+sed -i -e 's@-I/usr/local/include@@' -e 's@-L/usr/local/lib @@' binutils/Makefile &&
+
+make DESTDIR=${CLFS} tooldir=/usr install &&
+rm -fv ${CLFS}/usr/lib/lib{bfd,ctf,ctf-nobfd,gprofng,opcodes,sframe}.a &&
+rm -fv ${CLFS}/usr/lib/libsframe.la ${CLFS}/usr/lib/libbfd.la ${CLFS}/usr/lib/libopcodes.la \
+       ${CLFS}/usr/lib/libctf.la ${CLFS}/usr/lib/libctf-nobfd.la
+
+## GMP (CPPFLAGS=-fexceptions  removed)
+sed '8364s/-L$libdir//' -i ltmain.sh &&
+./configure --prefix=/usr \
+    --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --enable-cxx --disable-static \
+    --docdir=/usr/share/doc/gmp-6.3.0 &&
+make &&
+make html &&
+make DESTDIR=${CLFS} install &&
+make DESTDIR=${CLFS} install-html &&
+rm -v ${CLFS}/usr/lib/lib{gmp,gmpxx}.la
+
+## MPFR
+sed -e 's/+01,234,567/+1,234,567 /' \
+    -e 's/13.10Pd/13Pd/'            \
+    -i tests/tsprintf.c &&
+./configure --prefix=/usr --disable-static \
+    --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --enable-thread-safe \
+    --docdir=/usr/share/doc/mpfr-4.2.0 &&
+make &&
+make html &&
+make DESTDIR=${CLFS} install &&
+make DESTDIR=${CLFS} install-html &&
+rm -fv ${CLFS}/usr/lib/libmpfr.la
+
+## MPC
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --disable-static \
+            --docdir=/usr/share/doc/mpc-1.3.1
+make &&
+make html &&
+make DESTDIR=${CLFS} install &&
+make DESTDIR=${CLFS} install-html &&
+rm -fv ${CLFS}/usr/lib/libmpc.la
+
+## ISL
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --disable-static \
+            --docdir=/usr/share/doc/isl-0.26 &&
+make &&
+make html &&
+make DESTDIR=${CLFS} install &&
+make DESTDIR=${CLFS} install-html &&
+rm -fv ${CLFS}/usr/lib/libisl.la
+
+## ATTR
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --disable-static  \
+            --sysconfdir=/etc \
+            --docdir=/usr/share/doc/attr-2.5.1 &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libattr.la
+
+## ACL
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --disable-static \
+            --docdir=/usr/share/doc/acl-2.3.1 &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libacl.la
+
+## LIBCAP
+sed -i '/install -m.*STA/d' libcap/Makefile &&
+make BUILD_CC=gcc CROSS_COMPILE=${CLFS_TARGET}- \
+     PAM_CAP=no GO=no \
+     prefix=/usr lib=lib &&
+make BUILD_CC=gcc CROSS_COMPILE=${CLFS_TARGET}- \
+     PAM_CAP=no GO=no \
+     prefix=/usr lib=lib DESTDIR=${CLFS} install
+
+## LIBXCRYPT
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --enable-hashes=strong,glibc \
+            --enable-obsolete-api=no \
+            --disable-static \
+            --disable-failure-tokens &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libcrypt.la
+
+## SHADOW
+sed -i 's/groups$(EXEEXT) //' src/Makefile.in &&
+find man -name Makefile.in -exec sed -i 's/groups\.1 / /'   {} \; &&
+find man -name Makefile.in -exec sed -i 's/getspnam\.3 / /' {} \; &&
+find man -name Makefile.in -exec sed -i 's/passwd\.5 / /'   {} \; &&
+touch ${CLFS}/usr/bin/passwd &&
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --sysconfdir=/etc   \
+            --disable-static    \
+            --with-{b,yes}crypt \
+            --with-group-name-max-length=32 &&
+make &&
+make DESTDIR=${CLFS} exec_prefix=/usr install &&
+make DESTDIR=${CLFS} -C man install-man &&
+rm -fv ${CLFS}/usr/lib/libsubid.la &&
+${CLFS_TARGET}-pwconv &&
+${CLFS_TARGET}-grpconv &&
+${CLFS_TARGET}-passwd root #FIXME maybe shadow cross-tools for passwd misconfigured in patch
+                           #FIXME maybe shadow security we don't know about? set password manually with editor
+mkdir -pv ${CLFS}/etc/default
+
+## GCC
+mkdir ../gcc-build &&
+cd ../gcc-build &&
+../gcc-13.2.0/configure --prefix=/usr \
+             --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+			 --target=${CLFS_TARGET} LD=ld \
+             --enable-languages=c,c++ \
+             --enable-default-pie \
+             --enable-default-ssp \
+             --disable-multilib \
+             --disable-bootstrap \
+             --disable-fixincludes \
+             --with-system-zlib &&
+make &&
+make DESTDIR=${CLFS} install &&
+ln -svr ${CLFS}/usr/bin/cpp ${CLFS}/usr/lib &&
+ln -sv gcc.1 ${CLFS}/usr/share/man/man1/cc.1 &&
+ln -sfv ../../libexec/gcc/$(${CLFS_TARGET}-gcc -dumpmachine)/13.2.0/liblto_plugin.so \
+        ${CLFS}/usr/lib/bfd-plugins/ &&
+mkdir -pv ${CLFS}/usr/share/gdb/auto-load/usr/lib &&
+mv -v ${CLFS}/usr/lib/*gdb.py ${CLFS}/usr/share/gdb/auto-load/usr/lib
+
+## PKGCONFG
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --disable-static \
+            --docdir=/usr/share/doc/pkgconf-2.0.1 &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libpkgconf.la &&
+ln -sv pkgconf   ${CLFS}/usr/bin/pkg-config &&
+ln -sv pkgconf.1 ${CLFS}/usr/share/man/man1/pkg-config.1
+
+## NCURSES
+sed -i 's/INSTALL_OPT_S=\"-s/& --strip-program=${STRIP}/' configure &&
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --with-shared --mandir=/usr/share/man \
+    --enable-widec --without-debug --without-normal \
+    --with-cxx-shared --enable-pc-files \
+    --with-pkg-config-libdir=/usr/lib/pkgconfig \
+    --with-build-cc="gcc -D_GNU_SOURCE" &&
+make &&
+make DESTDIR=${CLFS} install &&
+for lib in ncurses form panel menu ; do
+    rm -vf                    ${CLFS}/usr/lib/lib${lib}.so
+    echo "INPUT(-l${lib}w)" > ${CLFS}/usr/lib/lib${lib}.so
+    ln -sfv ${lib}w.pc        ${CLFS}/usr/lib/pkgconfig/${lib}.pc
+done
+rm -vf                     ${CLFS}/usr/lib/libcursesw.so &&
+echo "INPUT(-lncursesw)" > ${CLFS}/usr/lib/libcursesw.so &&
+ln -sfv libncurses.so      ${CLFS}/usr/lib/libcurses.so &&
+cp -v -R doc -T ${CLFS}/usr/share/doc/ncurses-6.4
+
+## SED
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make html &&
+make DESTDIR=${CLFS} install &&
+install -d -m755 ${CLFS}/usr/share/doc/sed-4.9
+install -m644 doc/sed.html ${CLFS}/usr/share/doc/sed-4.9
+
+## PSMISC
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --exec-prefix="" \
+    --cache-file=config.cache &&
+make &&
+make DESTDIR=${CLFS} install
+
+## GETTEXT
+cat > config.cache << EOF
+am_cv_func_iconv_works=yes
+gl_cv_func_wcwidth_works=yes
+gt_cv_func_printf_posix=yes
+gt_cv_int_divbyzero_sigfpe=yes
+EOF
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --disable-static \
+    --cache-file=config.cache &&
+make &&
+make DESTDIR=${CLFS} install &&
+chmod -v 0755 ${CLFS}/usr/lib/preloadable_libintl.so &&
+rm -fv ${CLFS}/usr/lib/libasprintf.la &&
+rm -fv ${CLFS}/usr/lib/libtextstyle.la &&
+rm -fv ${CLFS}/usr/lib/libgettext{lib,src,po}.la
+
+## BISON
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr \
+    --docdir=/usr/share/doc/bison-3.8.2 &&
+make &&
+make DESTDIR=${CLFS} install
+
+## PCRE2
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr \
+            --docdir=/usr/share/doc/pcre2-10.42 \
+            --enable-unicode \
+            --enable-jit \
+            --enable-pcre2-16 \
+            --enable-pcre2-32 \
+            --enable-pcre2grep-libz \
+            --enable-pcre2grep-libbz2 \
+            --enable-pcre2test-libreadline \
+            --disable-static &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libpcre2-{8,16,32,posix}.la
+
+## GREP
+sed -i "s/echo/#echo/" src/egrep.sh &&
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make DESTDIR=${CLFS} install
+
+## BASH (Use normal bash-5.2.tar.gz and https://clfs.org/~kb0iic/patches/bash-5.2-fixes-1.patch)
+patch -Np1 -i ../bash-5.2-fixes-1.patch &&
+cat > config.cache << "EOF"
+ac_cv_func_mmap_fixed_mapped=yes
+ac_cv_func_strcoll_works=yes
+ac_cv_func_working_mktime=yes
+bash_cv_func_sigsetjmp=present
+bash_cv_getcwd_malloc=yes
+bash_cv_job_control_missing=present
+bash_cv_printf_a_format=yes
+bash_cv_sys_named_pipes=present
+bash_cv_ulimit_maxfds=yes
+bash_cv_under_sys_siglist=yes
+bash_cv_unusable_rtsigs=no
+gt_cv_int_divbyzero_sigfpe=yes
+EOF
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --cache-file=config.cache \
+    --without-bash-malloc --with-installed-readline \
+    --docdir=/usr/share/doc/bash-5.2 &&
+sed -i 's@/usr/lib$@@' Makefile &&
+make &&
+make DESTDIR=${CLFS} install &&
+ln -sv bash ${CLFS}/bin/sh
+
+## LIBTOOL
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libltdl.{l,}a
+
+## GDBM
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr \
+            --disable-static \
+            --enable-libgdbm-compat &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libgdbm{,_compat}.la
+
+## GPERF
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr --docdir=/usr/share/doc/gperf-3.1 &&
+make &&
+make DESTDIR=${CLFS} install
+
+## EXPAT (If host has docbook2man, disable it)
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr \
+            --disable-static \
+            --docdir=/usr/share/doc/expat-2.5.0 \
+            ac_cv_prog_DOCBOOK_TO_MAN=no &&
+make &&
+make DESTDIR=${CLFS} install &&
+install -v -m644 doc/*.{html,css} ${CLFS}/usr/share/doc/expat-2.5.0 &&
+rm -fv ${CLFS}/usr/lib/libexpat.la
+
+## INETUTILS (change perms to 4755 for traceroute, ping and ping6 later)
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --prefix=/usr \
+            --bindir=/usr/bin \
+            --localstatedir=/var \
+            --disable-logger \
+            --disable-whois \
+            --disable-rcp \
+            --disable-rexec \
+            --disable-rlogin \
+            --disable-rsh \
+            --disable-servers \
+            inetutils_cv_path_procnet_dev=yes &&
+make &&
+make DESTDIR=${CLFS} install &&
+mv -v ${CLFS}/usr/{,s}bin/ifconfig
+
+## LESS
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --sysconfdir=/etc &&
+make &&
+make DESTDIR=${CLFS} install
+
+## PERL (download https://github.com/arsv/perl-cross/releases/download/1.5/perl-cross-1.5.tar.gz)
+## XML-Parser (mv XML-Parser-2.46 to cpan/XML-Parser within perl-5.38.0/cpan directory)
+## Modified Makefile.PL for XML-Parser-2.46 to use expat at ${CLFS]/usr/{include,lib}
+## miniperl_top not passing environment variables properly to Makefile.PL for EXPATINCPATH and EXPATLIBPATH
+## https://clfs.org/~kb0iic/patches/Makefile.PL
+export BUILD_ZLIB=False
+export BUILD_BZIP2=0
+tar --strip-components=1 -zxf ../perl-cross-1.5.tar.gz &&
+tar -zxf ../XML-Parser-2.46.tar.gz &&
+mv XML-Parser-2.46 cpan/XML-Parser &&
+cp ../Makefile.PL cpan/XML-Parser/Makefile.PL ## EDIT PATHS IN THIS FILE
+./configure --target=${CLFS_TARGET} \
+             -Ddes \
+             -Dprefix=/usr \
+             -Dvendorprefix=/usr \
+             -Dprivlib=/usr/lib/perl5/5.38/core_perl \
+             -Darchlib=/usr/lib/perl5/5.38/core_perl \
+             -Dsitelib=/usr/lib/perl5/5.38/site_perl \
+             -Dsitearch=/usr/lib/perl5/5.38/site_perl \
+             -Dvendorlib=/usr/lib/perl5/5.38/vendor_perl \
+             -Dvendorarch=/usr/lib/perl5/5.38/vendor_perl \
+             -Dman1dir=/usr/share/man/man1 \
+             -Dman3dir=/usr/share/man/man3 \
+             -Dpager="/usr/bin/less -isR" \
+             -Duseshrplib \
+             -Dusethreads &&
+make -j1 &&
+make DESTDIR=${CLFS} install &&
+unset BUILD_ZLIB BUILD_BZIP2
+
+## INTLTOOL (Can use host perl which will find XML::Parser, intltool scripts shouldn't rely on host for anything)
+sed -i 's:\\\${:\\\$\\{:' intltool-update.in &&
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} install &&
+install -v -Dm644 doc/I18N-HOWTO ${CLFS}/usr/share/doc/intltool-0.51.0/I18N-HOWTO
+
+## AUTOCONF
+sed -e 's/SECONDS|/&SHLVL|/'               \
+    -e '/BASH_ARGV=/a\        /^SHLVL=/ d' \
+    -i.orig tests/local.at &&
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make DESTDIR=${CLFS} install
+
+## AUTOMAKE
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --docdir=/usr/share/doc/automake-1.16.5 &&
+make &&
+make DESTDIR=${CLFS} install
+
+## OPENSSL (Can use --cross-compile-prefix but we set environment variables before base build)
+./config --prefix=/usr \
+         --openssldir=/etc/ssl \
+         --libdir=lib \
+         shared \
+         zlib-dynamic \
+		 linux-armv4 && ## linux-armv4 will use atomic and generic32 Configuration
+make &&
+sed -i '/INSTALL_LIBS/s/libcrypto.a libssl.a//' Makefile &&
+make DESTDIR=${CLFS} MANSUFFIX=ssl install &&
+mv -v ${CLFS}/usr/share/doc/openssl ${CLFS}/usr/share/doc/openssl-3.1.2 &&
+cp -vfr doc/* ${CLFS}/usr/share/doc/openssl-3.1.2
+
+## KMOD
+./configure --prefix=/usr          \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --sysconfdir=/etc      \
+            --with-openssl         \
+            --with-xz              \
+            --with-zstd            \
+            --with-zlib &&
+make &&
+make DESTDIR=${CLFS} install &&
+for target in depmod insmod modinfo modprobe rmmod; do
+  ln -sfv ../bin/kmod ${CLFS}/usr/sbin/$target
+done
+
+ln -sfv kmod ${CLFS}/usr/bin/lsmod &&
+rm -fv ${CLFS}/usr/lib/libkmod.la
+
+## ELFUTILS
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --disable-debuginfod \
+            --enable-libdebuginfod=dummy &&
+make &&
+make DESTDIR=${CLFS} -C libelf install &&
+install -vm644 config/libelf.pc ${CLFS}/usr/lib/pkgconfig &&
+rm ${CLFS}/usr/lib/libelf.a
+
+## LIBFFI
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --disable-static &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libffi.la
+
+## COREUTILS
+patch -Np1 -i ../coreutils-9.3-i18n-1.patch &&
+cat > config.cache << EOF
+gl_cv_func_rename_trailing_slash_bug=no
+gl_cv_func_mbrtowc_incomplete_state=yes
+gl_cv_func_mbrtowc_nul_retval=yes
+gl_cv_func_mbrtowc_null_arg=yes
+gl_cv_func_mbrtowc_retval=yes
+gl_cv_func_btowc_eof=yes
+gl_cv_func_wcrtomb_retval=yes
+gl_cv_func_wctob_works=yes
+gl_cv_macro_MB_CUR_MAX_good=yes
+EOF
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr --cache-file=config.cache \
+    --enable-no-install-program=kill,uptime &&
+make &&
+make DESTDIR=${CLFS} install &&
+mv -v ${CLFS}/usr/bin/chroot ${CLFS}/usr/sbin &&
+mkdir -pv ${CLFS}/usr/share/man/man8 &&
+mv -v ${CLFS}/usr/share/man/man1/chroot.1 ${CLFS}/usr/share/man/man8/chroot.8 &&
+sed -i 's/"1"/"8"/' ${CLFS}/usr/share/man/man8/chroot.8
+
+## UTIL-LINUX
+sed -i '/test_mkfds/s/^/#/' tests/helpers/Makemodule.am &&
+./configure ADJTIME_PATH=/var/lib/hwclock/adjtime \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --bindir=/usr/bin    \
+            --libdir=/usr/lib    \
+            --runstatedir=/run   \
+            --sbindir=/usr/sbin  \
+            --disable-chfn-chsh  \
+            --disable-login      \
+            --disable-nologin    \
+            --disable-su         \
+            --disable-setpriv    \
+            --disable-runuser    \
+            --disable-pylibmount \
+            --disable-static     \
+            --without-python     \
+            --without-systemd    \
+            --without-systemdsystemunitdir \
+            --docdir=/usr/share/doc/util-linux-2.39.1 &&
+make NCURSES_LIBS="-L${CLFS}/usr/lib -lncursesw" &&
+sed -i 's/install-exec-hook-wall$//' Makefile &&
+sed -i 's/install-exec-hook-mount$//' Makefile &&
+sed -i 's/install-exec-hookd$//' Makefile &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/lib{uuid,blkid,mount,smartcols,fdisk}.la
+
+# POST install following exec hooks
+#install-exec-hook-wall chgrp tty and chmod g+s
+#install-exec-hook-mount chown root:root mount    chmod 4755 mount
+#install-exec-hook chown root:root su    chmod 4755 su
+
+## PYTHON (I've used Python 3.10.x until sorting out Python 3.11 crosscompile with --with-build-python)
+sed -i '/mime.types",/s/^/#/' Lib/mimetypes.py ## Disable knownfiles for mime-types
+sed -i '/self.detect_nis/d' setup.py &&
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --with-build-python=python3 \
+            --enable-shared \
+            --with-system-expat \
+            --with-system-ffi \
+            --enable-optimizations \
+            ac_cv_buggy_getaddrinfo= \
+            ac_cv_file__dev_ptmx=no \
+            ac_cv_file__dev_ptc=no &&
+make &&
+make DESTDIR=${CLFS} install ## May error if /etc/httpd is around for mimetypes on host
+                             ## unsure how to disable at the moment
+                             ## optionally install documentation
+
+## CROSSENV (For cross-compiling Python for $CLFS_TARGET)
+## TODO where is a good place for cross_venv   ${CLFS}/cross-tools?
+python3 -m crossenv $CLFS/usr/bin/python3 ${CLFS}/cross-tools/cross_venv
+
+## FLIT-CORE
+. ${CLFS}/cross-tools/cross_venv/bin/activate # Activate cross-virtual environment
+pip3 wheel -w dist --no-build-isolation --no-deps $PWD &&
+pip3 install --no-index --no-user --find-links dist flit_core &&
+cp -av ${CLFS}/cross-tools/cross_venv/cross/lib/python3.11/site-packages/* ${CLFS}/usr/lib/python3.11/site-packages/ &&
+deactivate
+
+## WHEEL
+. ${CLFS}/cross-tools/cross_venv/bin/activate # Activate cross-virtual environment
+pip3 wheel -w dist --no-build-isolation --no-deps $PWD &&
+pip3 install --no-index --find-links=dist wheel &&
+cp -av ${CLFS}/cross-tools/cross_venv/cross/lib/python3.11/site-packages/* ${CLFS}/usr/lib/python3.11/site-packages/ &&
+deactivate
+
+## NINJA
+. ${CLFS}/cross-tools/cross_venv/bin/activate
+sed -i '/int Guess/a \
+  int   j = 0;\
+  char* jobs = getenv( "NINJAJOBS" );\
+  if ( jobs != NULL ) j = atoi( jobs );\
+  if ( j > 0 ) return j;\
+' src/ninja.cc &&
+sed -i "s@./ninja')@/usr/bin/ninja')@" configure.py && #(bootstrap with host system's ninja during rebuild)
+python3 configure.py --bootstrap &&
+install -vm755 ninja ${CLFS}/usr/bin/ &&
+install -vDm644 misc/bash-completion ${CLFS}/usr/share/bash-completion/completions/ninja &&
+install -vDm644 misc/zsh-completion  ${CLFS}/usr/share/zsh/site-functions/_ninja &&
+cp -av ${CLFS}/cross-tools/cross_venv/cross/lib/python3.11/site-packages/* ${CLFS}/usr/lib/python3.11/site-packages/ &&
+deactivate
+
+## MESON
+. ${CLFS}/cross-tools/cross_venv/bin/activate
+pip3 wheel -w dist --no-build-isolation --no-deps $PWD &&
+pip3 install --no-index --find-links dist meson &&
+install -vDm644 data/shell-completions/bash/meson ${CLFS}/usr/share/bash-completion/completions/meson &&
+install -vDm644 data/shell-completions/zsh/_meson ${CLFS}/usr/share/zsh/site-functions/_meson &&
+cp -av ${CLFS}/cross-tools/cross_venv/cross/lib/python3.11/site-packages/* ${CLFS}/usr/lib/python3.11/site-packages/ &&
+deactivate
+
+cat > ${CLFS}/sources/x86_64-cross-linux-gnu-arm-linux-gnueabihf.txt << EOF
+[binaries]
+c = '${CLFS_TARGET}-gcc'
+cpp = '${CLFS_TARGET}-g++'
+ar = '${CLFS_TARGET}-ar'
+as = '${CLFS_TARGET}-as'
+ranlib = '${CLFS_TARGET}-ranlib'
+strip = '${CLFS_TARGET}-strip'
+ld = '${CLFS_TARGET}-ld'
+pkgconfig = '${CLFS_TARGET}-pkg-config'
+
+[properties]
+has_function_printf = true
+sys_root = '${CLFS}'
+pkg_config_libdir = '${CLFS}/usr/lib/pkgconfig'
+
+[build-in options]
+c_args = ['--sysroot=${CLFS}']
+c_link_args = ['--sysroot=${CLFS}', '-L${CLFS}/usr/lib']
+cpp_args = ['--sysroot=${CLFS}']
+cpp_link_args = ['--sysroot=${CLFS}', '-L${CLFS}/usr/lib']
+
+[host_machine]
+system = 'linux'
+cpu_family = 'arm'
+cpu = 'armv4'
+endian = 'little'
+EOF
+
+## CHECK
+./configure --prefix=/usr --disable-static \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET}
+make &&
+make DESTDIR=${CLFS} docdir=/usr/share/doc/check-0.15.2 install &&
+rm -fv ${CLFS}/usr/lib/libcheck.la
+
+## DIFFUTILS
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make DESTDIR=${CLFS} install
+
+## GAWK
+sed -i 's/extras//' Makefile.in &&
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} LN='ln -f' install &&
+ln -sv gawk.1 ${CLFS}/usr/share/man/man1/awk.1 &&
+mkdir -pv ${CLFS}/usr/share/doc/gawk-5.2.2 &&
+cp -v doc/{awkforai.txt,*.{eps,pdf,jpg}} ${CLFS}/usr/share/doc/gawk-5.2.2
+
+## FINDUTILS
+cat > config.cache << EOF
+gl_cv_func_wcwidth_works=yes
+gl_cv_header_working_fcntl_h=yes
+ac_cv_func_fnmatch_gnu=yes
+EOF
+./configure --prefix=/usr --localstatedir=/var/lib/locate \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --cache-file=config.cache &&
+make &&
+make DESTDIR=${CLFS} install
+
+## GROFF
+PAGE=letter ./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make GROFFBIN=groff GROFF_BIN_PATH= && # Build examples with host groff
+make DESTDIR=${CLFS} install
+
+## GZIP
+./configure --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+    --prefix=/usr &&
+make &&
+make DESTDIR=${CLFS} install
+
+## IPROUTE2
+sed -i /ARPD/d Makefile && rm -fv man/man8/arpd.8 &&
+for check in tirpc libbpf mnl berkeley_db;    # Remove deps not in sysroot
+	do sed -i "/check_${check}$/d" configure; done
+./configure --prefix=/usr &&
+echo "HAVE_MNL:=n" >> config.mk &&
+echo "TC_CONFIG_NO_XT:=y" >> config.mk &&
+make CC=${CC} HOSTCC=gcc NETNS_RUN_DIR=/run/netns &&
+make DESTDIR=${CLFS} SBINDIR=/usr/sbin install &&
+mkdir -pv ${CLFS}/usr/share/doc/iproute2-6.4.0 &&
+cp -v COPYING README* ${CLFS}/usr/share/doc/iproute2-6.4.0
+
+## KBD
+patch -Np1 -i ../kbd-2.6.1-backspace-1.patch &&
+sed -i '/RESIZECONS_PROGS=/s/yes/no/' configure &&
+sed -i 's/resizecons.8 //' docs/man/man8/Makefile.in &&
+./configure --prefix=/usr --disable-vlock \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} install &&
+cp -R -v docs/doc -T ${CLFS}/usr/share/doc/kbd-2.6.1
+
+## LIBPIPELINE
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libpipeline.la
+
+## MAKE
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} install
+
+## PATCH
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} install
+
+## TAR
+cat > config.cache << EOF
+gl_cv_func_wcwidth_works=yes
+gl_cv_func_btowc_eof=yes
+ac_cv_func_malloc_0_nonnull=yes
+ac_cv_func_realloc_0_nonnull=yes
+gl_cv_func_mbrtowc_incomplete_state=yes
+gl_cv_func_mbrtowc_nul_retval=yes
+gl_cv_func_mbrtowc_null_arg=yes
+gl_cv_func_mbrtowc_retval=yes
+gl_cv_func_wcrtomb_retval=yes
+EOF
+FORCE_UNSAFE_CONFIGURE=1  \
+./configure --prefix=/usr --cache-file=config.cache \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} install &&
+make DESTDIR=${CLFS} -C doc install-html docdir=${CLFS}/usr/share/doc/tar-1.35
+
+## TEXINFO
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} &&
+make &&
+make DESTDIR=${CLFS} install &&
+make TEXMF=${CLFS}/usr/share/texmf install-tex
+
+## VIM
+cat > src/auto/config.cache << EOF
+vim_cv_getcwd_broken=no
+vim_cv_memmove_handles_overlap=yes
+vim_cv_stat_ignores_slash=no
+vim_cv_terminfo=yes
+vim_cv_tgetent=zero
+vim_cv_toupper_broken=no
+vim_cv_tty_group=world
+ac_cv_sizeof_int=4
+EOF
+cat >> src/feature.h << "EOF"
+#define SYS_VIMRC_FILE "/etc/vimrc"
+EOF
+echo '#define SYS_VIMRC_FILE "/etc/vimrc"' >> src/feature.h &&
+./configure --prefix=/usr \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --with-tlib=ncurses  --config-cache &&
+make &&
+make DESTDIR=${CLFS} install &&
+ln -sv vim /usr/bin/vi
+for L in  /usr/share/man/{,*/}man1/vim.1; do
+    ln -sv vim.1 $(dirname $L)/vi.1
+done
+ln -sv ../vim/vim90/doc ${CLFS}/usr/share/doc/vim-9.0 &&
+cat > ${CLFS}/etc/vimrc << "EOF"
+" Begin /etc/vimrc
+
+" Ensure defaults are set before customizing settings, not after
+source $VIMRUNTIME/defaults.vim
+let skip_defaults_vim=1
+
+set nocompatible
+set backspace=2
+set mouse=
+syntax on
+if (&term == "xterm") || (&term == "putty")
+  set background=dark
+endif
+
+" End /etc/vimrc
+EOF
+
+## MARKUPSAFE
+. ${CLFS}/cross-tools/cross_venv/bin/activate
+pip3 wheel -w dist --no-build-isolation --no-deps $PWD &&
+pip3 install --no-index --no-user --find-links dist Markupsafe &&
+cp -av ${CLFS}/cross-tools/cross_venv/cross/lib/python3.11/site-packages/* ${CLFS}/usr/lib/python3.11/site-packages/ &&
+deactivate
+
+## JINJA2
+. ${CLFS}/cross-tools/cross_venv/bin/activate
+pip3 wheel -w dist --no-build-isolation --no-deps $PWD &&
+pip3 install --no-index --no-user --find-links dist Jinja2 &&
+cp -av ${CLFS}/cross-tools/cross_venv/cross/lib/python3.11/site-packages/* ${CLFS}/usr/lib/python3.11/site-packages/ &&
+deactivate
+
+## UDEV
+. ${CLFS}/cross-tools/cross_venv/bin/activate
+sed -i -e 's/GROUP="render"/GROUP="video"/' \
+       -e 's/GROUP="sgx", //' rules.d/50-udev-default.rules.in &&
+sed '/systemd-sysctl/s/^/#/' -i rules.d/99-systemd.rules.in &&
+mkdir -p build &&
+cd       build &&
+meson setup \
+      --prefix=/usr                 \
+      --buildtype=release           \
+      -Dmode=release                \
+      -Ddev-kvm-mode=0660           \
+      -Dlink-udev-shared=false      \
+	  --cross-file ../../x86_64-cross-linux-gnu-arm-linux-gnueabihf.txt \
+      .. &&
+ninja udevadm systemd-hwdb \
+      $(grep -o -E "^build (src/libudev|src/udev|rules.d|hwdb.d)[^:]*" \
+        build.ninja | awk '{ print $2 }')                              \
+      $(realpath libudev.so --relative-to .) &&
+rm -v rules.d/90-vconsole.rules &&
+install -vm755 -d ${CLFS}{/usr/lib,/etc}/udev/{hwdb,rules}.d &&
+install -vm755 -d ${CLFS}/usr/{lib,share}/pkgconfig &&
+install -vm755 udevadm                     ${CLFS}/usr/bin/ &&
+install -vm755 systemd-hwdb                ${CLFS}/usr/bin/udev-hwdb &&
+ln      -svfn  ../bin/udevadm              ${CLFS}/usr/sbin/udevd &&
+cp      -av    libudev.so{,*[0-9]}         ${CLFS}/usr/lib/ &&
+install -vm644 ../src/libudev/libudev.h    ${CLFS}/usr/include/ &&
+install -vm644 src/libudev/*.pc            ${CLFS}/usr/lib/pkgconfig/ &&
+install -vm644 src/udev/*.pc               ${CLFS}/usr/share/pkgconfig/ &&
+install -vm644 ../src/udev/udev.conf       ${CLFS}/etc/udev/ &&
+install -vm644 rules.d/* ../rules.d/{*.rules,README} ${CLFS}/usr/lib/udev/rules.d/ &&
+install -vm644 hwdb.d/*  ../hwdb.d/{*.hwdb,README}   ${CLFS}/usr/lib/udev/hwdb.d/ &&
+install -vm755 $(find src/udev -type f | grep -F -v ".") ${CLFS}/usr/lib/udev &&
+tar -xvf ../../udev-lfs-20230818.tar.xz &&
+make -f udev-lfs-20230818/Makefile.lfs DESTDIR=${CLFS} install &&
+tar -xf ../../systemd-man-pages-254.tar.xz                            \
+    --no-same-owner --strip-components=1                              \
+    -C ${CLFS}/usr/share/man --wildcards '*/udev*' '*/libudev*'              \
+                                  '*/systemd-'{hwdb,udevd.service}.8 &&
+sed 's/systemd\(\\\?-\)/udev\1/' ${CLFS}/usr/share/man/man8/systemd-hwdb.8   \
+                               > ${CLFS}/usr/share/man/man8/udev-hwdb.8 &&
+sed 's|lib.*udevd|sbin/udevd|'                                        \
+    ${CLFS}/usr/share/man/man8/systemd-udevd.service.8                       \
+  > ${CLFS}/usr/share/man/man8/udevd.8 &&
+rm  -v ${CLFS}/usr/share/man/man8/systemd-*.8
+
+# POST CONFIG udev-hwdb update
+
+## MAN-DB
+PKG_CONF=${CLFS_TARGET}-pkg-config \
+./configure --prefix=/usr                         \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --docdir=/usr/share/doc/man-db-2.11.2 \
+            --sysconfdir=/etc                     \
+            --disable-setuid                      \
+            --enable-cache-owner=bin              \
+            --with-browser=/usr/bin/lynx          \
+            --with-vgrind=/usr/bin/vgrind         \
+            --with-grap=/usr/bin/grap             \
+            --with-systemdtmpfilesdir=            \
+            --with-systemdsystemunitdir= &&
+make libpipeline_CFLAGS= &&
+make DESTDIR=${CLFS} install
+
+## PROCPS-NG
+./configure --prefix=/usr                           \
+            --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+            --docdir=/usr/share/doc/procps-ng-4.0.3 \
+            --disable-static                        \
+            --disable-kill &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/libproc2.la
+
+## E2FSPROGS
+mkdir -v build &&
+cd build &&
+PKG_CONF=${CLFS_TARGET}-pkg-config \
+../configure --prefix=/usr           \
+             --build=${CLFS_HOST} --host=${CLFS_TARGET} \
+             --sysconfdir=/etc       \
+             --enable-elf-shlibs     \
+             --disable-libblkid      \
+             --disable-libuuid       \
+             --disable-uuidd         \
+             --disable-fsck &&
+sed -i 's@-L/usr/lib@@' {e2fsck,debugfs,misc,.}/Makefile &&
+make &&
+make DESTDIR=${CLFS} install &&
+rm -fv ${CLFS}/usr/lib/{libcom_err,libe2p,libext2fs,libss}.{l,}a &&
+gunzip -v ${CLFS}/usr/share/info/libext2fs.info.gz &&
+install-info --dir-file=${CLFS}/usr/share/info/dir ${CLFS}/usr/share/info/libext2fs.info &&
+makeinfo -o      doc/com_err.info ../lib/et/com_err.texinfo &&
+install -v -m644 doc/com_err.info ${CLFS}/usr/share/info &&
+install-info --dir-file=${CLFS}/usr/share/info/dir ${CLFS}/usr/share/info/com_err.info
+
+## SYSKLOGD
+sed -i '/Error loading kernel symbols/{n;n;d}' ksym_mod.c &&
+sed -i 's/union wait/int/' syslogd.c &&
+make CC=${CC} &&
+sed -i "s@-m 500 -s@& --strip-program=${CLFS_TARGET}-strip@" Makefile &&
+make prefix=${CLFS} MAN_USER=`whoami` MAN_GROUP=`whoami` BINDIR=${CLFS}/sbin install &&
+cat > ${CLFS}/etc/syslog.conf << "EOF"
+# Begin /etc/syslog.conf
+
+auth,authpriv.* -/var/log/auth.log
+*.*;auth,authpriv.none -/var/log/sys.log
+daemon.* -/var/log/daemon.log
+kern.* -/var/log/kern.log
+mail.* -/var/log/mail.log
+user.* -/var/log/user.log
+*.emerg *
+
+# End /etc/syslog.conf
+EOF
+
+## SYSVINIT
+patch -Np1 -i ../sysvinit-3.07-consolidated-1.patch &&
+make &&
+make DESTDIR=${CLFS} BIN_OWNER=`whoami` BIN_GROUP=`whoami` install
+
+## CLEANUP
+find ${CLFS}/usr/lib ${CLFS}/usr/libexec -name \*.la -delete &&
+
+##### SYSTEM CONFIGURATION (LFS CH9) #####
+
+## LFS-BOOTSCRIPTS
+make DESTDIR=${CLFS} install
+
+## CONFIGURE NETWORK
+# Let use deal with this
+# /etc/sysconfig/ifconfig.eth0 (or other interface name)
+# /etc/resolv.conf
+# /etc/hostname
+echo "sysroot" > ${CLFS}/etc/hostname
+# /etc/hosts
+cat > ${CLFS}/etc/hosts << "EOF"
+# Begin /etc/hosts
+
+127.0.0.1 localhost.localdomain localhost
+#127.0.1.1 <FQDN> <HOSTNAME>
+#<192.168.1.1> <FQDN> <HOSTNAME> [alias1] [alias2 ...]
+::1       localhost ip6-localhost ip6-loopback
+ff02::1   ip6-allnodes
+ff02::2   ip6-allrouters
+
+# End /etc/hosts
+EOF
+
+## CONFIG-SYSVINIT
+cat > ${CLFS}/etc/inittab << "EOF"
+# Begin /etc/inittab
+
+id:3:initdefault:
+
+si::sysinit:/etc/rc.d/init.d/rc S
+
+l0:0:wait:/etc/rc.d/init.d/rc 0
+l1:S1:wait:/etc/rc.d/init.d/rc 1
+l2:2:wait:/etc/rc.d/init.d/rc 2
+l3:3:wait:/etc/rc.d/init.d/rc 3
+l4:4:wait:/etc/rc.d/init.d/rc 4
+l5:5:wait:/etc/rc.d/init.d/rc 5
+l6:6:wait:/etc/rc.d/init.d/rc 6
+
+ca:12345:ctrlaltdel:/sbin/shutdown -t1 -a -r now
+
+su:S06:once:/sbin/sulogin
+s1:1:respawn:/sbin/sulogin
+
+1:2345:respawn:/sbin/agetty --noclear tty1 9600
+2:2345:respawn:/sbin/agetty tty2 9600
+3:2345:respawn:/sbin/agetty tty3 9600
+4:2345:respawn:/sbin/agetty tty4 9600
+5:2345:respawn:/sbin/agetty tty5 9600
+6:2345:respawn:/sbin/agetty tty6 9600
+
+# End /etc/inittab
+EOF
+
+cat > ${CLFS}/etc/sysconfig/clock << "EOF"
+# Begin /etc/sysconfig/clock
+
+UTC=1
+
+# Set this to any options you might need to give to hwclock,
+# such as machine hardware clock type for Alphas.
+CLOCKPARAMS=
+
+# End /etc/sysconfig/clock
+EOF
+
+# /etc/sysconfig/console
+
+cat > ${CLFS}/etc/profile << "EOF"
+# Begin /etc/profile
+
+export LANG=en_US.UTF-8
+
+# End /etc/profile
+EOF
+
+## INPUTRC
+cat > ${CLFS}/etc/inputrc << "EOF"
+# Begin /etc/inputrc
+# Modified by Chris Lynn <roryo@roryo.dynup.net>
+
+# Allow the command prompt to wrap to the next line
+set horizontal-scroll-mode Off
+
+# Enable 8-bit input
+set meta-flag On
+set input-meta On
+
+# Turns off 8th bit stripping
+set convert-meta Off
+
+# Keep the 8th bit for display
+set output-meta On
+
+# none, visible or audible
+set bell-style none
+
+# All of the following map the escape sequence of the value
+# contained in the 1st argument to the readline specific functions
+"\eOd": backward-word
+"\eOc": forward-word
+
+# for linux console
+"\e[1~": beginning-of-line
+"\e[4~": end-of-line
+"\e[5~": beginning-of-history
+"\e[6~": end-of-history
+"\e[3~": delete-char
+"\e[2~": quoted-insert
+
+# for xterm
+"\eOH": beginning-of-line
+"\eOF": end-of-line
+
+# for Konsole
+"\e[H": beginning-of-line
+"\e[F": end-of-line
+
+# End /etc/inputrc
+EOF
+
+## SHELLS
+cat > ${CLFS}/etc/shells << "EOF"
+# Begin /etc/shells
+
+/bin/sh
+/bin/bash
+
+# End /etc/shells
+EOF
+
+##### BOOTABLE (LFS CH10) #####
+
+## FSTAB
+cat > ${CLFS}/etc/fstab << "EOF"
+# Begin /etc/fstab
+
+# file system  mount-point    type     options             dump  fsck
+#                                                                order
+
+/dev/<xxx>     /              <fff>    defaults            1     1
+/dev/<yyy>     swap           swap     pri=1               0     0
+proc           /proc          proc     nosuid,noexec,nodev 0     0
+sysfs          /sys           sysfs    nosuid,noexec,nodev 0     0
+devpts         /dev/pts       devpts   gid=5,mode=620      0     0
+tmpfs          /run           tmpfs    defaults            0     0
+devtmpfs       /dev           devtmpfs mode=0755,nosuid    0     0
+tmpfs          /dev/shm       tmpfs    nosuid,nodev        0     0
+cgroup2        /sys/fs/cgroup cgroup2  nosuid,noexec,nodev 0     0
+
+# End /etc/fstab
+EOF
+
+## LINUX KERNEL
+# User build kernel if required
+
+##### THE END (LFS CH11) #####
+
+echo 12.0 > ${CLFS}/etc/lfs-release
+
+cat > ${CLFS}/etc/lsb-release << "EOF"
+DISTRIB_ID="Linux From Scratch"
+DISTRIB_RELEASE="12.0"
+DISTRIB_CODENAME="CLFS_SYSROOT_LFS_HYBRID"
+DISTRIB_DESCRIPTION="Linux From Scratch"
+EOF
+
+cat > ${CLFS}/etc/os-release << "EOF"
+NAME="Linux From Scratch"
+VERSION="12.0"
+ID=lfs
+PRETTY_NAME="Linux From Scratch 12.0"
+VERSION_CODENAME="CLFS_SYSROOT_LFS_HYBRID"
+EOF
+
+##### CHANGING OWNERSHIP AND FIX PERMISSIONS (CLFS SYSROOT CH9.4) #####
+
+chown -Rv 0:0 ${CLFS} &&
+chgrp -v 13 ${CLFS}/var/run/utmp ${CLFS}/var/log/lastlog &&
+chmod -v g+s ${CLFS}/usr/bin/wall &&
+chgrp -v 5 ${CLFS}/usr/bin/wall &&
+chmod -v 4755 ${CLFS}/usr/bin/{chage,chfn,chsh,expiry,gpasswd,mount,newgidmap,newgrp,newuidmap,passwd,ping,ping6,su,traceroute,umount} &&
+mknod -m 0666 ${CLFS}/dev/null c 1 3 &&
+mknod -m 0600 ${CLFS}/dev/console c 5 1
